@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HandScroll</string>
+    <string name="accessibility_service_name">HandScroll управление жестами</string>
+    <string name="accessibility_service_description">Позволяет HandScroll выполнять свайпы и двойной тап по вашему жесту руки.</string>
+    <string name="notification_channel_name">Управление жестами</string>
+    <string name="notification_title">HandScroll включён</string>
+    <string name="notification_text">Фронтальная камера распознаёт жесты локально</string>
+    <string name="notification_stop">Остановить</string>
+</resources>
