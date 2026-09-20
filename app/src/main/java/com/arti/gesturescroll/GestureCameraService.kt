@@ -11,6 +11,7 @@ import android.os.IBinder
 import android.os.SystemClock
 import android.util.Log
 import android.util.Size
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -95,16 +96,64 @@ class GestureCameraService : LifecycleService() {
                 analysis.setAnalyzer(analyzerExecutor, ::analyzeFrame)
 
                 provider.unbindAll()
-                provider.bindToLifecycle(
+                val camera = provider.bindToLifecycle(
                     this,
                     CameraSelector.DEFAULT_FRONT_CAMERA,
                     analysis,
                 )
+                configureLowLight(camera)
             } catch (t: Throwable) {
                 Log.e(TAG, "Camera binding failed", t)
                 GestureRuntime.setError(t.message ?: "Не удалось открыть фронтальную камеру")
                 stopSelf()
             }
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun configureLowLight(camera: Camera) {
+        val mainExecutor = ContextCompat.getMainExecutor(this)
+        if (camera.cameraInfo.isLowLightBoostSupported) {
+            val request = camera.cameraControl.enableLowLightBoostAsync(true)
+            request.addListener({
+                runCatching { request.get() }
+                    .onSuccess { Log.i(TAG, "Hardware low-light boost enabled") }
+                    .onFailure {
+                        Log.w(TAG, "Hardware low-light boost failed; using exposure compensation", it)
+                        applyExposureCompensation(camera)
+                    }
+            }, mainExecutor)
+            return
+        }
+
+        applyExposureCompensation(camera)
+    }
+
+    private fun applyExposureCompensation(camera: Camera) {
+        val state = camera.cameraInfo.exposureState
+        if (!state.isExposureCompensationSupported) {
+            Log.i(TAG, "Exposure compensation not supported")
+            return
+        }
+
+        val range = state.exposureCompensationRange
+        val step = state.exposureCompensationStep.toFloat()
+        val targetIndex = if (step > 0f) {
+            kotlin.math.ceil(1.5f / step).toInt().coerceIn(range.lower, range.upper)
+        } else {
+            range.upper.coerceAtLeast(0)
+        }
+        if (targetIndex <= 0) return
+
+        val request = camera.cameraControl.setExposureCompensationIndex(targetIndex)
+        request.addListener({
+            runCatching { request.get() }
+                .onSuccess {
+                    Log.i(
+                        TAG,
+                        "Exposure compensation applied: index=$targetIndex, step=$step",
+                    )
+                }
+                .onFailure { Log.w(TAG, "Exposure compensation failed", it) }
         }, ContextCompat.getMainExecutor(this))
     }
 
@@ -121,13 +170,16 @@ class GestureCameraService : LifecycleService() {
 
             val upright = rotateBitmap(source, rotationDegrees)
             if (upright !== source) source.recycle()
-            pendingBitmap.set(upright)
+
+            val recognitionFrame = LowLightFrameEnhancer.enhanceIfNeeded(upright)
+            if (recognitionFrame !== upright) upright.recycle()
+            pendingBitmap.set(recognitionFrame)
 
             val now = SystemClock.uptimeMillis()
             val timestamp = if (now <= lastTimestampMs) lastTimestampMs + 1L else now
             lastTimestampMs = timestamp
 
-            val mpImage = BitmapImageBuilder(upright).build()
+            val mpImage = BitmapImageBuilder(recognitionFrame).build()
             recognizer?.recognizeAsync(mpImage, timestamp)
                 ?: finishFrame()
         } catch (t: Throwable) {
