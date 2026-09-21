@@ -21,6 +21,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.components.processors.ClassifierOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.gesturerecognizer.GestureRecognizer
 import com.google.mediapipe.tasks.vision.gesturerecognizer.GestureRecognizerResult
@@ -66,12 +67,17 @@ class GestureCameraService : LifecycleService() {
         val baseOptions = BaseOptions.builder()
             .setModelAssetPath(MODEL_ASSET)
             .build()
+        val classifierOptions = ClassifierOptions.builder()
+            .setMaxResults(7)
+            .setScoreThreshold(0.20f)
+            .build()
         val options = GestureRecognizer.GestureRecognizerOptions.builder()
             .setBaseOptions(baseOptions)
             .setNumHands(1)
             .setMinHandDetectionConfidence(0.5f)
             .setMinHandPresenceConfidence(0.5f)
             .setMinTrackingConfidence(0.5f)
+            .setCannedGesturesClassifierOptions(classifierOptions)
             .setRunningMode(RunningMode.LIVE_STREAM)
             .setResultListener(this::onRecognitionResult)
             .setErrorListener { error ->
@@ -192,24 +198,27 @@ class GestureCameraService : LifecycleService() {
 
     private fun onRecognitionResult(result: GestureRecognizerResult, ignored: com.google.mediapipe.framework.image.MPImage) {
         try {
-            val category = result.gestures()
-                .firstOrNull()
-                ?.maxByOrNull { it.score() }
-            val landmarks = result.landmarks().firstOrNull()
-            val palmY = landmarks?.let { hand ->
-                val indices = intArrayOf(0, 5, 9, 13, 17)
-                indices.map { hand[it].y() }.average().toFloat()
-            }
+            val categories = result.gestures().firstOrNull().orEmpty()
+            val topCategory = categories.maxByOrNull { it.score() }
+            val openPalmScore = categories
+                .firstOrNull { it.categoryName() == "Open_Palm" }
+                ?.score() ?: 0f
+            val thumbUpScore = categories
+                .firstOrNull { it.categoryName() == "Thumb_Up" }
+                ?.score() ?: 0f
 
-            val gestureName = category?.categoryName()
-            val gestureScore = category?.score() ?: 0f
+            val landmarks = result.landmarks().firstOrNull()
+            val handMetrics = landmarks?.let(::calculateHandMetrics)
             val action = interpreter.onFrame(
-                gestureName = gestureName,
-                gestureScore = gestureScore,
-                palmY = palmY,
-                timestampMs = SystemClock.uptimeMillis(),
+                openPalmScore = openPalmScore,
+                thumbUpScore = thumbUpScore,
+                palmX = handMetrics?.palmX,
+                palmY = handMetrics?.palmY,
+                handScale = handMetrics?.scale,
+                timestampMs = result.timestampMs(),
             )
 
+            val gestureName = topCategory?.categoryName()
             if (gestureName != null && gestureName != "None") {
                 GestureRuntime.setLastGesture(displayGesture(gestureName))
             }
@@ -229,6 +238,36 @@ class GestureCameraService : LifecycleService() {
         } finally {
             finishFrame()
         }
+    }
+
+    private data class HandMetrics(
+        val palmX: Float,
+        val palmY: Float,
+        val scale: Float,
+    )
+
+    private fun calculateHandMetrics(
+        hand: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>,
+    ): HandMetrics {
+        val palmIndices = intArrayOf(0, 5, 9, 13, 17)
+        val palmX = palmIndices.map { hand[it].x() }.average().toFloat()
+        val palmY = palmIndices.map { hand[it].y() }.average().toFloat()
+        val wristToMiddleMcp = landmarkDistance(hand[0], hand[9])
+        val palmWidth = landmarkDistance(hand[5], hand[17])
+        return HandMetrics(
+            palmX = palmX,
+            palmY = palmY,
+            scale = maxOf(wristToMiddleMcp, palmWidth, 0.04f),
+        )
+    }
+
+    private fun landmarkDistance(
+        first: com.google.mediapipe.tasks.components.containers.NormalizedLandmark,
+        second: com.google.mediapipe.tasks.components.containers.NormalizedLandmark,
+    ): Float {
+        val dx = second.x() - first.x()
+        val dy = second.y() - first.y()
+        return kotlin.math.sqrt(dx * dx + dy * dy)
     }
 
     private inline fun dispatch(label: String, block: () -> Boolean) {
